@@ -25,6 +25,7 @@ require 'omniauth'
 require 'openssl'
 require 'securerandom'
 
+
 module OmniAuth
   module Strategies
     # A strategy for authentication against Azure Active Directory.
@@ -48,6 +49,8 @@ module OmniAuth
       args [:client_id, :tenant]
       option :client_id, nil
       option :tenant, nil
+      option :openid_config_endpoint, nil
+      option :scope, nil
 
       # Field renaming is an attempt to fit the OmniAuth recommended schema as
       # best as possible.
@@ -62,14 +65,19 @@ module OmniAuth
       end
       credentials { { code: @code } }
       extra do
-        { session_state: @session_state,
-          raw_info:
-            { id_token: @id_token,
-              id_token_claims: @claims,
-              id_token_header: @header } }
+        {
+          session_state: @session_state,
+          raw_info:{ 
+            id_token: @id_token,
+            id_token_claims: @claims,
+            id_token_header: @header 
+          }
+        }
       end
 
       DEFAULT_RESPONSE_TYPE = 'code id_token'
+      DEFAULT_SCOPE = 'openid'
+      DEFAULT_TENANT = 'common'
       DEFAULT_RESPONSE_MODE = 'form_post'
 
       ##
@@ -103,11 +111,20 @@ module OmniAuth
       # @return String
       def authorize_endpoint_url
         uri = URI(openid_config['authorization_endpoint'])
-        uri.query = URI.encode_www_form(client_id: client_id,
-                                        redirect_uri: callback_url,
-                                        response_mode: response_mode,
-                                        response_type: response_type,
-                                        nonce: new_nonce)
+        params = {
+          client_id: client_id,
+          scope: scope,
+          response_type: response_type,
+          response_mode: response_mode,
+          redirect_uri: redirect_uri,
+          nonce: new_nonce
+        }.to_a
+
+        # preserve existing URL params
+        if uri.query.present?
+          params += URI.decode_www_form(String(uri.query))
+        end
+        uri.query = URI.encode_www_form(params)
         uri.to_s
       end
 
@@ -195,7 +212,7 @@ module OmniAuth
       #
       # @return String
       def openid_config_url
-        "https://login.windows.net/#{tenant}/.well-known/openid-configuration"
+        options[:openid_config_url] || "https://login.windows.net/#{tenant}/.well-known/openid-configuration"
       end
 
       ##
@@ -252,8 +269,17 @@ module OmniAuth
       #
       # @return String
       def tenant
-        return options.tenant if options.tenant
-        fail StandardError, 'No tenant specified in AzureAD configuration.'
+        return options.tenant || DEFAULT_TENANT
+      end
+
+      ##
+      # The response_mode that will be set in the authorization request query
+      # parameters. Can be overridden by the client, but it shouldn't need to
+      # be.
+      #
+      # @return String
+      def scope
+        return options.scope || DEFAULT_SCOP
       end
 
       ##
@@ -283,7 +309,7 @@ module OmniAuth
             end
             # The key also contains other fields, such as n and e, that are
             # redundant. x5c is sufficient to verify the id token.
-            OpenSSL::X509::Certificate.new(JWT.base64url_decode(x5c.first)).public_key
+            OpenSSL::X509::Certificate.new(JWT::Base64.url_decode(x5c.first)).public_key
           end
         return jwt_claims, jwt_header if jwt_claims['nonce'] == read_nonce
         fail JWT::DecodeError, 'Returned nonce did not match.'
@@ -300,7 +326,7 @@ module OmniAuth
         # This maps RS256 -> sha256, ES384 -> sha384, etc.
         algorithm = (header['alg'] || 'RS256').sub(/RS|ES|HS/, 'sha')
         full_hash = OpenSSL::Digest.new(algorithm).digest code
-        c_hash = JWT.base64url_encode full_hash[0..full_hash.length / 2 - 1]
+        c_hash = JWT::Encode.base64url_encode full_hash[0..full_hash.length / 2 - 1]
         return if c_hash == claims['c_hash']
         fail JWT::VerificationError,
              'c_hash in id token does not match auth code.'
@@ -314,13 +340,15 @@ module OmniAuth
       #
       # @return Hash
       def verify_options
-        { verify_expiration: true,
+        { 
+          verify_expiration: true,
           verify_not_before: true,
           verify_iat: true,
           verify_iss: true,
           'iss' => issuer,
           verify_aud: true,
-          'aud' => client_id }
+          'aud' => client_id
+        }
       end
     end
   end
